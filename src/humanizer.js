@@ -95,6 +95,16 @@ async function fixTypo(channel, sent, text, typo) {
   }
 }
 
+/** Posts a generated voice clip. The spoken text goes into the attachment's alt text, so it is also readable history. */
+export function sendVoiceFile(channel, wav, text, { replyTo } = {}) {
+  const files = [{ attachment: wav, name: 'voice.wav', description: text.slice(0, 1000) }];
+  return channel.send(
+    replyTo
+      ? { files, reply: { messageReference: replyTo, failIfNotExists: false }, allowedMentions: { parse: [], repliedUser: false } }
+      : { files, allowedMentions: { parse: [] } },
+  );
+}
+
 /**
  * Sends a message the human way. `replyTo` is only used on the first message.
  * May post a typo first and fix it later (edit, or a "word*" follow-up).

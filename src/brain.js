@@ -2,7 +2,8 @@ import { ChannelType, PermissionFlagsBits } from 'discord.js';
 import { config } from './config.js';
 import { applyNotes, getSetting, listNotes } from './db.js';
 import { generateReply, getPersona } from './ai.js';
-import { sendHuman, sleep } from './humanizer.js';
+import { sendHuman, sendVoiceFile, sleep } from './humanizer.js';
+import { synthesize } from './tts.js';
 
 /**
  * channelId -> {
@@ -88,9 +89,11 @@ async function fetchHistory(channel, botId) {
     .map((m) => {
       const files = [...m.attachments.values()];
       const images = files.filter((a) => /^image\/(png|jpeg|gif|webp)/.test(a.contentType ?? ''));
-      let content = m.cleanContent;
+      // The bot's own voice clips carry the spoken text as alt text; show that instead of "[sent a file]".
+      const voiceClip = m.author.id === botId ? files.find((a) => a.contentType?.startsWith('audio/') && a.description) : null;
+      let content = voiceClip ? voiceClip.description : m.cleanContent;
       if (images.length) content += ` [sent ${images.length} image(s)]`;
-      if (files.length > images.length) content += ` [sent ${files.length - images.length} file(s)]`;
+      if (!voiceClip && files.length > images.length) content += ` [sent ${files.length - images.length} file(s)]`;
       if (m.author.id !== botId) {
         people.set(m.author.id, { name: nameOf(m), username: m.author.username, bot: m.author.bot });
       }
@@ -101,6 +104,7 @@ async function fetchHistory(channel, botId) {
         author: label(m),
         replyTo: parent ? label(parent) : null,
         content: content.trim(),
+        voice: Boolean(voiceClip),
         images: m.author.id === botId ? [] : images.map((a) => a.url),
       };
     })
@@ -128,6 +132,28 @@ function describePlace(channel, people) {
     `Channel: #${channel.name}${topic}\n` +
     `People in the recent chat:\n${list || '- (nobody yet)'}`
   );
+}
+
+/** Speaks `text` with Piper and posts the clip. Returns false (nothing sent) when the caller should fall back to text. */
+async function sendVoice(channel, text, { replyTo, signal }) {
+  if (!config.ttsEnabled) return false;
+  const me = channel.client.user;
+  if (channel.guild && !channel.permissionsFor(me)?.has(PermissionFlagsBits.AttachFiles)) return false;
+
+  const typing = setInterval(() => void channel.sendTyping().catch(() => {}), 8000);
+  try {
+    await channel.sendTyping().catch(() => {});
+    const wav = await synthesize(text, signal);
+    signal.throwIfAborted();
+    await sendVoiceFile(channel, wav, text, { replyTo });
+    return true;
+  } catch (error) {
+    if (signal.aborted) throw error;
+    console.error('[tts]', error.message);
+    return false;
+  } finally {
+    clearInterval(typing);
+  }
 }
 
 // Servers share one notebook; each DM gets its own.
@@ -173,6 +199,15 @@ async function run(channel, state) {
 
     // Quote-reply only when other messages landed after the one we answer.
     const quote = replyTo && history.at(-1)?.id !== replyTo.id ? replyTo : null;
+
+    if (result.action === 'voice') {
+      // No text goes to Discord for a voice reply, unless voice fails: then say it as text instead.
+      if (!(await sendVoice(channel, result.text, { replyTo: quote, signal }))) {
+        await sendHuman(channel, result.text.slice(0, 2000), { replyTo: quote, signal });
+      }
+      state.activeUntil = Date.now() + config.activeWindowMs;
+      return;
+    }
 
     for (const [i, text] of result.messages.entries()) {
       if (i > 0) await sleep(rand(400, 1400), signal);

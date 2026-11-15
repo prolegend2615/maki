@@ -31,19 +31,25 @@ export function getPersona() {
   return config.defaultPersona;
 }
 
+const voiceRules = () =>
+  `\n\nVoice messages: instead of texting you can speak. Reply with ONLY {"action":"voice","text":"what you say out loud"} (notes allowed too). ` +
+  `Use it rarely: when someone asks to hear you, or when a short spoken line is funnier than text. ` +
+  `Max ${config.ttsMaxChars} characters, spoken words only: no emoji, no markdown, no links, no actions in asterisks. Never use it for long answers. Your earlier voice messages show up in the chat as your own lines.`;
+
 function buildSystemPrompt({ persona, botName, mustAnswer, notes, place }) {
   const extra = mustAnswer
     ? 'The latest message is addressed to you. You may still ignore it only if your character truly would.'
     : 'You are just overhearing the chat. Ignoring is very normal here; only jump in if it feels natural.';
   const notebook = notes.length ? notes.map((n) => `#${n.id}: ${n.text}`).join('\n') : '(empty)';
-  return `${persona}\n\nYour name in this chat is "${botName}".\n\nWhere you are:\n${place}\n\n${RULES}\n\nYour notebook right now:\n${notebook}\n\n${extra}`;
+  return `${persona}\n\nYour name in this chat is "${botName}".\n\nWhere you are:\n${place}\n\n${RULES}${config.ttsEnabled ? voiceRules() : ''}\n\nYour notebook right now:\n${notebook}\n\n${extra}`;
 }
 
 /** Turns Discord history (oldest first) into chat-completion messages. */
 function toChatMessages(history, botId, withImages = true) {
   return history.map((m) => {
     if (m.authorId === botId) {
-      return { role: 'assistant', content: JSON.stringify({ action: 'reply', messages: [m.content] }) };
+      const reply = m.voice ? { action: 'voice', text: m.content } : { action: 'reply', messages: [m.content] };
+      return { role: 'assistant', content: JSON.stringify(reply) };
     }
     const text = `${m.author}${m.replyTo ? ` (replying to ${m.replyTo})` : ''}: ${m.content}`;
     if (!withImages || !m.images?.length) return { role: 'user', content: text };
@@ -67,7 +73,7 @@ function cleanNotes(raw) {
   return { add, remove };
 }
 
-/** Returns { action: 'reply', messages, notes } or { action: 'ignore', notes }. */
+/** Returns { action: 'reply', messages, notes }, { action: 'voice', text, notes } or { action: 'ignore', notes }. */
 export function parseReply(raw) {
   let text = raw.trim();
   text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
@@ -79,7 +85,12 @@ export function parseReply(raw) {
       const data = JSON.parse(text.slice(start, end + 1));
       const notes = cleanNotes(data.notes);
       if (data.action === 'ignore') return { action: 'ignore', notes };
-      const list = (Array.isArray(data.messages) ? data.messages : [data.message ?? data.content])
+      if (data.action === 'voice' && config.ttsEnabled && typeof data.text === 'string') {
+        const text = data.text.trim().slice(0, config.ttsMaxChars);
+        if (text) return { action: 'voice', text, notes };
+      }
+      // Also covers a "voice" answer while TTS is off: it just becomes a normal text reply.
+      const list = (Array.isArray(data.messages) ? data.messages : [data.message ?? data.content ?? data.text])
         .filter((s) => typeof s === 'string')
         .map((s) => s.trim())
         .filter(Boolean);

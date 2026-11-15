@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 if (existsSync('.env')) process.loadEnvFile('.env');
 
@@ -15,6 +16,11 @@ const num = (key, fallback) => {
   const value = Number(raw);
   return Number.isFinite(value) ? value : fallback;
 };
+
+// A bare command name ("piper") is looked up on PATH; anything with a slash is resolved to an absolute path.
+const asPath = (value) => (/[\\/]/.test(value) ? resolve(value) : value);
+const piperBin = asPath(env.PIPER_BIN || '');
+const piperVoice = env.PIPER_VOICE ? resolve(env.PIPER_VOICE) : '';
 
 export const config = {
   discordToken: need('DISCORD_TOKEN'),
@@ -43,6 +49,13 @@ export const config = {
   debounceMinMs: num('DEBOUNCE_MIN_MS', 1200),
   debounceMaxMs: num('DEBOUNCE_MAX_MS', 2600),
   temperature: num('TEMPERATURE', 0.9),
+
+  // Text-to-speech with Piper. Enabled only when both PIPER_BIN and PIPER_VOICE are set.
+  piperBin,
+  piperVoice,
+  ttsEnabled: Boolean(piperBin && piperVoice),
+  ttsMaxChars: num('TTS_MAX_CHARS', 300),
+  ttsTimeoutMs: num('TTS_TIMEOUT_SECONDS', 30) * 1000,
 
   defaultPersona:
     'You are Mika, a 19-year-old college student who is sarcastic, warm underneath, and a bit chaotic. ' +
