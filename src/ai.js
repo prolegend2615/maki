@@ -34,7 +34,10 @@ export function getPersona() {
 const voiceRules = () =>
   `\n\nVoice messages: instead of texting you can speak. Reply with ONLY {"action":"voice","text":"what you say out loud"} (notes allowed too). ` +
   `Use it rarely: when someone asks to hear you, or when a short spoken line is funnier than text. ` +
-  `Max ${config.ttsMaxChars} characters, spoken words only: no emoji, no markdown, no links, no actions in asterisks. Never use it for long answers. Your earlier voice messages show up in the chat as your own lines.`;
+  `Max ${config.ttsMaxChars} characters, spoken words only: no emoji, no markdown, no links, no actions in asterisks. Never use it for long answers. Your earlier voice messages show up in the chat as your own lines.\n` +
+  `Examples: someone says "say hi in voice" -> {"action":"voice","text":"hiii, it's me. can you hear me?"}. ` +
+  `Someone says "can i hear your voice?" -> {"action":"voice","text":"sure, here you go. pretty weird hearing myself talk honestly"}. ` +
+  `A normal chat message -> a normal {"action":"reply",...} text reply. When asked for voice, do it instead of saying you can't.`;
 
 function buildSystemPrompt({ persona, botName, mustAnswer, notes, place }) {
   const extra = mustAnswer
