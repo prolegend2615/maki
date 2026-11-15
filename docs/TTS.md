@@ -4,7 +4,15 @@ Mika can answer with a voice clip instead of text. The model chooses that itself
 
 Piper only runs while it speaks, so it uses no RAM when idle. Jobs run one at a time.
 
-## Install on a Linux VPS
+## Quick install (script)
+
+```bash
+npm run setup:piper
+```
+
+Downloads the Piper binary for your OS/CPU and the `en_US-lessac-medium` voice into `./piper`, skips files already there, runs a test, and prints the two `.env` lines. Another voice: `npm run setup:piper -- en_US-amy-medium`. Needs Node 22 and `tar` (on Linux and macOS, and on Windows 10+).
+
+## Install by hand on a Linux VPS
 
 Pick the archive for your CPU: `x86_64` (most VPS) or `aarch64` (ARM).
 

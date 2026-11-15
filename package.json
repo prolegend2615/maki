@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "node --test test/smoke.test.js"
+    "test": "node --test test/smoke.test.js",
+    "setup:piper": "node scripts/setup-piper.js"
   },
   "dependencies": {
     "discord.js": "^14.16.0"
