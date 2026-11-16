@@ -22,12 +22,38 @@ const asPath = (value) => (/[\\/]/.test(value) ? resolve(value) : value);
 const piperBin = asPath(env.PIPER_BIN || '');
 const piperVoice = env.PIPER_VOICE ? resolve(env.PIPER_VOICE) : '';
 
+const splitList = (raw) => (raw || '').split(',').map((s) => s.trim()).filter(Boolean);
+const hostOf = (base) => {
+  try {
+    return new URL(base).host || base;
+  } catch {
+    return base;
+  }
+};
+
+/**
+ * LLM providers, tried in order; within each provider its models are tried in order.
+ * Simple setup: API_KEY / API_BASE_URL / MODEL (acts as the first provider).
+ * Multi-provider: PROVIDER1_API_KEY / PROVIDER1_BASE_URL / PROVIDER1_MODELS, up to PROVIDER8_.
+ */
+const providers = [];
+if (env.API_KEY) {
+  const apiBase = (env.API_BASE_URL || 'https://api.xkiro.com/v1').replace(/\/+$/, '');
+  const models = splitList(env.MODEL);
+  providers.push({ label: hostOf(apiBase), apiBase, apiKey: env.API_KEY, models: models.length ? models : ['openai/gpt-4o'] });
+}
+for (let i = 1; i <= 8; i++) {
+  const apiKey = env[`PROVIDER${i}_API_KEY`];
+  const models = splitList(env[`PROVIDER${i}_MODELS`]);
+  if (!apiKey || !models.length) continue;
+  const apiBase = (env[`PROVIDER${i}_BASE_URL`] || 'https://api.xkiro.com/v1').replace(/\/+$/, '');
+  providers.push({ label: `${i}:${hostOf(apiBase)}`, apiBase, apiKey, models });
+}
+if (!providers.length) throw new Error('Missing API_KEY (or PROVIDER1_API_KEY + PROVIDER1_MODELS) in .env');
+
 export const config = {
   discordToken: need('DISCORD_TOKEN'),
-  apiKey: need('API_KEY'),
-  apiBase: (env.API_BASE_URL || 'https://api.xkiro.com/v1').replace(/\/+$/, ''),
-  // Comma-separated list, tried in order: MODEL=openai/gpt-4o, google/gemini-3.1-pro
-  models: (env.MODEL || 'openai/gpt-4o').split(',').map((s) => s.trim()).filter(Boolean),
+  providers,
   guildId: env.GUILD_ID || null,
 
   // Chance (0-1) to silently skip a message when the bot was NOT pinged
@@ -49,6 +75,39 @@ export const config = {
   debounceMinMs: num('DEBOUNCE_MIN_MS', 1200),
   debounceMaxMs: num('DEBOUNCE_MAX_MS', 2600),
   temperature: num('TEMPERATURE', 0.9),
+
+  // Automatic memory: rolling channel summaries + per-person fact extraction
+  // in a background pass after the chat goes quiet. 'off' disables it.
+  autoMemory: (env.AUTO_MEMORY || 'on') !== 'off',
+  summaryMaxChars: num('SUMMARY_MAX_CHARS', 900),
+  // Only run the fact-extraction pass when at least this many new messages exist.
+  minExtractMessages: num('MEMORY_MIN_MESSAGES', 5),
+
+  // Chance (0-1) that a message the bot chose to ignore still gets a subtle 👀 reaction.
+  readChance: num('READ_CHANCE', 0.3),
+
+  // Proactive follow-ups ("did you end up watching it?") — basic limits per channel.
+  proactivePerDay: num('PROACTIVE_PER_DAY', 2),
+  proactiveMinHours: num('PROACTIVE_MIN_HOURS', 4),
+  // Server-hour window in which follow-ups are postponed (bot "sleeps").
+  proactiveQuietStart: num('PROACTIVE_QUIET_START', 23),
+  proactiveQuietEnd: num('PROACTIVE_QUIET_END', 9),
+
+  // Tenor GIF search (free API key: Google Cloud Console -> enable "Tenor API").
+  // Empty key = GIF action is disabled and the bot only texts.
+  tenorKey: env.TENOR_API_KEY || '',
+  tenorContentFilter: env.TENOR_CONTENT_FILTER || 'medium',
+
+  // Chance (0-1) that a model-proposed "rephrase" actually becomes a send-then-edit self-correction.
+  selfCorrectChance: num('SELF_CORRECT_CHANCE', 0.5),
+
+  // Server notebook: a durable profile of each guild, rewritten by a throttled background pass.
+  serverNotebookChars: num('SERVER_NOTEBOOK_CHARS', 2000),
+  serverNotebookHours: num('SERVER_NOTEBOOK_HOURS', 4),
+  // Announcements: chance to react 👀 on a new announcement, and to comment on it
+  // in her most recent active channel (comment goes through the proactive limits; 0 = off).
+  announceReactChance: num('ANNOUNCE_REACT_CHANCE', 0.3),
+  announceCommentChance: num('ANNOUNCE_COMMENT_CHANCE', 0),
 
   // Text-to-speech with Piper. Enabled only when both PIPER_BIN and PIPER_VOICE are set.
   piperBin,

@@ -1,6 +1,6 @@
 import { Client, Events, GatewayIntentBits, Partials } from 'discord.js';
 import { config } from './config.js';
-import { onMessage } from './brain.js';
+import { onMessage, restoreFollowUps } from './brain.js';
 import { commands, handleCommand } from './commands.js';
 
 const client = new Client({
@@ -17,6 +17,7 @@ const client = new Client({
 
 client.once(Events.ClientReady, async (c) => {
   console.log(`Logged in as ${c.user.tag}`);
+  restoreFollowUps(c); // re-arm follow-ups that were pending before a restart
   try {
     if (config.guildId) {
       await c.guilds.cache.get(config.guildId)?.commands.set(commands);

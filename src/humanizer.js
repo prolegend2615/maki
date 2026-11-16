@@ -95,6 +95,19 @@ async function fixTypo(channel, sent, text, typo) {
   }
 }
 
+/**
+ * The "wait no—" move: reconsiders the wording a few seconds later and edits the
+ * message to the rephrased version. Deliberately not tied to the abort signal, like fixTypo.
+ */
+export async function selfCorrect(sent, rephrased) {
+  try {
+    await sleep(rand(4000, 9000));
+    await sent.edit({ content: rephrased.slice(0, 2000), allowedMentions: { parse: [] } });
+  } catch (error) {
+    console.error('[self-correct]', error.message); // e.g. message was deleted
+  }
+}
+
 /** Posts a generated voice clip. The spoken text goes into the attachment's alt text, so it is also readable history. */
 export function sendVoiceFile(channel, wav, text, { replyTo } = {}) {
   const files = [{ attachment: wav, name: 'voice.wav', description: text.slice(0, 1000) }];
@@ -108,11 +121,12 @@ export function sendVoiceFile(channel, wav, text, { replyTo } = {}) {
 /**
  * Sends a message the human way. `replyTo` is only used on the first message.
  * May post a typo first and fix it later (edit, or a "word*" follow-up).
+ * `noTypo` skips the typo mechanic — used when the message will be edited again anyway.
  */
-export async function sendHuman(channel, text, { replyTo, signal } = {}) {
+export async function sendHuman(channel, text, { replyTo, signal, noTypo } = {}) {
   await typeFor(channel, text, signal);
 
-  const typo = chance(config.typoChance) ? makeTypo(text) : null;
+  const typo = !noTypo && chance(config.typoChance) ? makeTypo(text) : null;
   const payload = (content) =>
     replyTo
       ? { content, reply: { messageReference: replyTo, failIfNotExists: false }, allowedMentions: { parse: [], repliedUser: false } }
