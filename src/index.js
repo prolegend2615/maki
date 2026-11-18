@@ -1,7 +1,9 @@
 import { Client, Events, GatewayIntentBits, Partials } from 'discord.js';
 import { config } from './config.js';
 import { onMessage, restoreFollowUps } from './brain.js';
+import { handleAutomod } from './automod.js';
 import { commands, handleCommand } from './commands.js';
+import { handleStaffButton } from './staffFlow.js';
 
 const client = new Client({
   intents: [
@@ -30,8 +32,9 @@ client.once(Events.ClientReady, async (c) => {
   }
 });
 
-client.on(Events.MessageCreate, (message) => {
+client.on(Events.MessageCreate, async (message) => {
   try {
+    if (await handleAutomod(message)) return; // deleted as spam/scam: nothing to chat about
     onMessage(message);
   } catch (error) {
     console.error('[messageCreate]', error);
@@ -39,6 +42,14 @@ client.on(Events.MessageCreate, (message) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (interaction.isButton() && interaction.customId.startsWith('staff:')) {
+    try {
+      await handleStaffButton(interaction);
+    } catch (error) {
+      console.error('[staff button]', error);
+    }
+    return;
+  }
   if (!interaction.isChatInputCommand()) return;
   try {
     await handleCommand(interaction);

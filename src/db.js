@@ -3,7 +3,8 @@ import { mkdirSync } from 'node:fs';
 
 mkdirSync('data', { recursive: true });
 
-const db = new DatabaseSync('data/bot.db');
+// BOT_DB lets the test suite use a scratch database instead of the live bot's one.
+const db = new DatabaseSync(process.env.BOT_DB || 'data/bot.db');
 db.exec(`
   CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS notes (
@@ -42,6 +43,7 @@ const setStmt = db.prepare(
 
 export const getSetting = (key) => getStmt.get(key)?.value ?? null;
 export const setSetting = (key, value) => void setStmt.run(key, String(value));
+export const closeDb = () => db.close();
 const delStmt = db.prepare('DELETE FROM settings WHERE key = ?');
 const prefixStmt = db.prepare('SELECT key, value FROM settings WHERE key LIKE ?');
 export const deleteSetting = (key) => void delStmt.run(key);

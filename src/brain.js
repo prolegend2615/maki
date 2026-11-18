@@ -15,10 +15,12 @@ import {
   listUserFacts,
   setSetting,
 } from './db.js';
-import { describeMood, describeUser, extractMemories, generateReply, getPersona, updateServerNotebook, updateSummary } from './ai.js';
+import { describeImageUrls, describeMood, describeUser, extractMemories, generateReply, getPersona, updateServerNotebook, updateSummary } from './ai.js';
 import { searchGif } from './gifs.js';
 import { selfCorrect, sendHuman, sendVoiceFile, sleep } from './humanizer.js';
 import { synthesize } from './tts.js';
+import { prepareStaff, staffPermsLine } from './staff.js';
+import { recordStaffEvent, staffEventsLine, startStaffConfirm, auditStaff } from './staffFlow.js';
 
 /**
  * channelId -> {
@@ -146,7 +148,7 @@ export function onMessage(message) {
  * Also returns the distinct people who spoke (for the "who is here" section of the prompt).
  * `after` fetches messages newer than that message id instead (used by the memory passes).
  */
-async function fetchHistory(channel, botId, { limit = config.historyLimit, after } = {}) {
+export async function fetchHistory(channel, botId, { limit = config.historyLimit, after } = {}) {
   const fetched = await channel.messages.fetch({ limit, ...(after ? { after } : {}) });
   const msgs = [...fetched.values()]
     .filter((m) => !m.system)
@@ -168,12 +170,19 @@ async function fetchHistory(channel, botId, { limit = config.historyLimit, after
   const history = msgs
     .map((m) => {
       const files = [...m.attachments.values()];
-      const images = files.filter((a) => /^image\/(png|jpeg|gif|webp)/.test(a.contentType ?? ''));
+      const images = files.filter((a) => /^image\/(png|jpeg|webp)/.test(a.contentType ?? ''));
+      // Vision providers reject animated GIFs: keep them out of the image payload, show the link as text.
+      const gifs = files.filter((a) => /^image\/gif/.test(a.contentType ?? ''));
       // The bot's own voice clips carry the spoken text as alt text; show that instead of "[sent a file]".
       const voiceClip = m.author.id === botId ? files.find((a) => a.contentType?.startsWith('audio/') && a.description) : null;
       let content = voiceClip ? voiceClip.description : m.cleanContent;
-      if (images.length) content += ` [sent ${images.length} image(s)]`;
-      if (!voiceClip && files.length > images.length) content += ` [sent ${files.length - images.length} file(s)]`;
+      images.forEach((a, i) => {
+        const desc = getSetting(`imgDesc:${m.id}:${i}`);
+        content += desc ? ` [image: ${desc}]` : ' [sent an image]';
+      });
+      for (const g of gifs) content += ` [sent a GIF: ${g.url}]`;
+      const otherFiles = files.length - images.length - gifs.length;
+      if (!voiceClip && otherFiles > 0) content += ` [sent ${otherFiles} file(s)]`;
       if (m.author.id !== botId) {
         people.set(m.author.id, { id: m.author.id, name: nameOf(m), username: m.author.username, bot: m.author.bot });
       }
@@ -188,9 +197,15 @@ async function fetchHistory(channel, botId, { limit = config.historyLimit, after
         time: new Date(m.createdTimestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
         voice: Boolean(voiceClip),
         images: m.author.id === botId ? [] : images.map((a) => a.url),
+        imageUrls: images.map((a) => a.url), // kept even when seen, for the "images" lookup
       };
     })
     .filter((m) => m.content);
+
+  // Pixels only for images newer than the last completed run: each image is seen once,
+  // afterwards its stored description carries it. Lookup retries inside a run keep them.
+  const seenAt = Number(getSetting(`imgSeen:${channel.id}`) || 0);
+  for (const m of history) if (m.ts <= seenAt) m.images = [];
 
   // Only the newest few images are actually sent to the model (cost); older ones stay as text.
   let budget = config.maxImages;
@@ -256,6 +271,7 @@ async function run(channel, state, nudge = null) {
   const { signal } = controller;
   // Not cleared yet: if a newer message aborts this run, the next run must still know it was addressed.
   const { mustAnswer, replyTo } = state;
+  let freshImages = [];
   const settle = () => {
     if (signal.aborted) return;
     state.mustAnswer = false;
@@ -270,6 +286,7 @@ async function run(channel, state, nudge = null) {
     const scope = notebookScope(channel);
     const { history, people } = await fetchHistory(channel, botId);
     if (!history.length) return settle();
+    freshImages = history.flatMap((m) => m.images.map((url, i) => ({ messageId: m.id, index: i, url })));
 
     const botName = channel.guild?.members.me?.displayName ?? channel.client.user.username;
     const now = new Date().toLocaleString('en-GB', {
@@ -290,6 +307,11 @@ async function run(channel, state, nudge = null) {
       status: describeUser(getUserStats(scope, p.id)),
       facts: listUserFacts(scope, p.id).map((f) => f.text),
     }));
+    // Staff actions mirror the asker's own Discord perms; tell the model what they may request.
+    const staffOn = config.staffEnabled && Boolean(channel.guild);
+    const askerId = replyTo?.author?.id ?? [...history].reverse().find((m) => m.authorId !== botId)?.authorId;
+    const asker = staffOn && askerId ? channel.guild.members.cache.get(askerId) : null;
+    const staffPerms = asker && !asker.user.bot ? staffPermsLine(asker, channel) : null;
     const base = {
       history,
       botId,
@@ -300,15 +322,49 @@ async function run(channel, state, nudge = null) {
       now,
       nudge,
       mood: describeMood(storedMood),
+      staffOn,
+      staffPerms,
+      staffEvents: staffOn ? staffEventsLine(channel.id) : null,
       signal,
     };
     // Lean prompt: the big memory blocks (server notebook, diary, notes, announcements)
     // are read on demand via lookup actions. Two lookups max, then she must answer or ignore.
     let result = await generateReply(base);
     for (let reads = 0; result.action === 'lookup' && reads < 2 && !signal.aborted; reads++) {
-      result = await generateReply({ ...base, lookupContext: await performLookup(channel, scope, profiles, result) });
+      const reread = result.what === 'images' ? recentImageUrls(history) : [];
+      const lookupContext =
+        result.what === 'images' && !reread.length
+          ? '(no images in the recent chat)'
+          : await performLookup(channel, scope, profiles, result);
+      result = await generateReply({ ...base, lookupContext, lookupImages: reread });
     }
     if (result.action === 'lookup') return settle(); // the model kept asking instead of answering
+
+    if (result.action === 'staff') {
+      const requester =
+        channel.guild && askerId
+          ? channel.guild.members.cache.get(askerId) ?? (await channel.guild.members.fetch(askerId).catch(() => null))
+          : null;
+      const prep = requester
+        ? await prepareStaff(result, { channel, requester, history })
+        : { ok: false, reason: 'I could not tell who is asking for this' };
+      if (prep.ok) {
+        const quote = !nudge && replyTo && history.at(-1)?.id !== replyTo.id ? replyTo : null;
+        await startStaffConfirm(channel, prep.plan, { messages: result.messages, replyTo: quote, signal });
+        applyNotes(scope, result.notes);
+        settle();
+        state.activeUntil = Date.now() + config.activeWindowMs;
+        return;
+      }
+      // Blocked: hand the reason back so the model declines in character instead of a system error.
+      if (channel.guild) {
+        const what = `${result.op}${result.user ? ` ${result.user}` : ''}${result.channel ? ` in #${result.channel}` : ''}`;
+        recordStaffEvent(channel.id, `${what} — BLOCKED: ${prep.reason}`);
+        auditStaff(channel.guild, { summary: what, requester: requester?.displayName ?? 'unknown', outcome: 'Blocked', detail: prep.reason });
+      }
+      result = await generateReply({ ...base, staffFeedback: prep.reason });
+      if (result.action === 'staff' || result.action === 'lookup') result = { action: 'ignore', notes: result.notes };
+    }
 
     // The notebook is saved even when the bot stays silent.
     applyNotes(scope, result.notes);
@@ -379,7 +435,27 @@ async function run(channel, state, nudge = null) {
     console.error(`[brain] ${channel.id}:`, error.message);
   } finally {
     if (state.controller === controller) state.controller = null;
+    // The run finished (not superseded): these images count as seen, and get a stored description.
+    if (!signal.aborted && freshImages.length) {
+      setSetting(`imgSeen:${channel.id}`, String(Date.now()));
+      void describeImages(freshImages);
+    }
   }
+}
+
+/** Newest few static image urls in the window, oldest first, for the "images" lookup. */
+function recentImageUrls(history) {
+  const urls = [];
+  for (let i = history.length - 1; i >= 0 && urls.length < config.maxImages; i--) urls.push(...(history[i].imageUrls ?? []));
+  return urls.slice(0, config.maxImages).reverse();
+}
+
+/** Stores a one-or-two-sentence description per image so later runs read text instead of pixels. */
+async function describeImages(entries) {
+  const lines = await describeImageUrls(entries.map((e) => e.url));
+  entries.forEach((e, i) => {
+    if (lines[i]) setSetting(`imgDesc:${e.messageId}:${e.index}`, lines[i].slice(0, 200));
+  });
 }
 
 // --- Automatic memory ---------------------------------------------------------
@@ -417,6 +493,41 @@ export async function performLookup(channel, scope, profiles, result) {
         if (g.description) lines.push(`Server description: ${g.description.slice(0, 200)}`);
         if (g.preferredLocale) lines.push(`Main language: ${g.preferredLocale}`);
         return lines.join('\n');
+      }
+      case 'structure': {
+        if (!channel.guild) return '(not available: this is a DM, not a server)';
+        const all = [...(channel.guild.channels?.cache?.values?.() ?? [])]
+          .filter((c) => !c.isThread?.())
+          .sort((a, b) => (a.rawPosition ?? a.position ?? 0) - (b.rawPosition ?? b.position ?? 0));
+        const label = (c) => `#${c.name}${c.type === ChannelType.GuildVoice ? ' [voice]' : ''}`;
+        const lines = [];
+        for (const cat of all.filter((c) => c.type === ChannelType.GuildCategory)) {
+          const kids = all.filter((c) => c.parentId === cat.id);
+          lines.push(`[category] ${cat.name}${kids.length ? `: ${kids.map(label).join(', ')}` : ' (empty)'}`);
+        }
+        const loose = all.filter((c) => c.type !== ChannelType.GuildCategory && !c.parentId);
+        if (loose.length) lines.push(`No category: ${loose.map(label).join(', ')}`);
+        if (!lines.length) return '(no channels visible to me)';
+        const text = lines.join('\n');
+        return text.length > 3000 ? `${text.slice(0, 3000)}\n...(list truncated)` : text;
+      }
+      case 'images': {
+        // The urls themselves are attached by run(); this line just tells the model they are there.
+        return '(the last images are attached to this request — look at them, then answer)';
+      }
+      case 'roles': {
+        if (!channel.guild) return '(not available: this is a DM, not a server)';
+        const roles = [...(channel.guild.roles?.cache?.values?.() ?? [])]
+          .filter((r) => r.id !== channel.guild.roles.everyone?.id)
+          .sort((a, b) => (b.position ?? 0) - (a.position ?? 0))
+          .slice(0, 25);
+        if (!roles.length) return '(no roles besides @everyone)';
+        return roles
+          .map((r) => {
+            const perms = (r.permissions?.toArray?.() ?? []).filter((p) => KEY_PERMS.includes(p));
+            return `${r.name} — color ${r.hexColor ?? '#000000'}, position ${r.position ?? 0}${perms.length ? `, key perms: ${perms.join(', ')}` : ''}`;
+          })
+          .join('\n');
       }
       case 'member': {
         if (!channel.guild) return '(not available: this is a DM, not a server)';

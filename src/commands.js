@@ -1,5 +1,6 @@
 import { SlashCommandBuilder, PermissionFlagsBits, InteractionContextType, ChannelType, MessageFlags } from 'discord.js';
-import { getSetting, getWatchList, setWatchList, setSetting } from './db.js';
+import { deleteSetting, getSetting, getWatchList, setWatchList, setSetting } from './db.js';
+import { config } from './config.js';
 
 export const commands = [
   new SlashCommandBuilder()
@@ -46,6 +47,22 @@ export const commands = [
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
     .setContexts([InteractionContextType.Guild])
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName('staff-log')
+    .setDescription('Where Mika logs staff actions (lock, slowmode, timeout)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .setContexts([InteractionContextType.Guild])
+    .addSubcommand((s) =>
+      s
+        .setName('set')
+        .setDescription('Log every staff action to a channel')
+        .addChannelOption((o) =>
+          o.setName('channel').setDescription('Log channel').addChannelTypes(ChannelType.GuildText).setRequired(true),
+        ),
+    )
+    .addSubcommand((s) => s.setName('show').setDescription('Show the current log channel'))
+    .addSubcommand((s) => s.setName('clear').setDescription('Stop logging to the configured channel'))
+    .toJSON(),
 ];
 
 const notebookOf = (guildId) => {
@@ -83,6 +100,27 @@ export async function handleCommand(interaction) {
       const watched = list.length ? list.map((id) => `- <#${id}> (manual)`).join('\n') : '- (none manually watched)';
       await interaction.reply({
         content: `**Watched announcement channels**\n${watched}\n- native announcement channels and channels named announce*/news are always watched`,
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+    return;
+  }
+
+  if (interaction.commandName === 'staff-log') {
+    const sub = interaction.options.getSubcommand();
+    const key = `staffLog:${interaction.guildId}`;
+    if (sub === 'set') {
+      const channel = interaction.options.getChannel('channel', true);
+      setSetting(key, channel.id);
+      await interaction.reply({ content: `Staff actions will be logged in <#${channel.id}>.`, flags: MessageFlags.Ephemeral });
+    } else if (sub === 'clear') {
+      deleteSetting(key);
+      const fallback = config.staffLogChannelId ? ' The STAFF_LOG_CHANNEL env default still applies.' : '';
+      await interaction.reply({ content: `Cleared the log channel.${fallback}`, flags: MessageFlags.Ephemeral });
+    } else {
+      const id = getSetting(key) || config.staffLogChannelId;
+      await interaction.reply({
+        content: id ? `Logging staff actions in <#${id}>.` : 'No log channel set — use `/staff-log set` to pick one.',
         flags: MessageFlags.Ephemeral,
       });
     }

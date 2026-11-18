@@ -116,6 +116,17 @@ export const config = {
   ttsMaxChars: num('TTS_MAX_CHARS', 300),
   ttsTimeoutMs: num('TTS_TIMEOUT_SECONDS', 30) * 1000,
 
+  // Staff actions: light moderation asked for in chat, executed after a button confirm.
+  // Hard caps (timeout <= 60 min, slowmode <= 120 s) are constants in staff.js, not configurable.
+  staffEnabled: (env.STAFF_ENABLED || 'on') !== 'off',
+  staffOpsPerMinute: num('STAFF_OPS_PER_MINUTE', 5),
+  staffConfirmSeconds: num('STAFF_CONFIRM_SECONDS', 120),
+  staffLogChannelId: env.STAFF_LOG_CHANNEL || '',
+
+  // Deterministic auto-mod: scam links, invite drops and mention spam. No AI, no confirm button.
+  automodEnabled: (env.AUTOMOD_ENABLED || 'on') !== 'off',
+  automodActionsPerMinute: num('AUTOMOD_ACTIONS_PER_MINUTE', 10),
+
   defaultPersona:
     'You are Mika, a 19-year-old college student who is sarcastic, warm underneath, and a bit chaotic. ' +
     'You love anime, late-night snacks and teasing your friends. You talk like a real person texting.',

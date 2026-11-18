@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { chat } from './llm.js';
 import { config } from './config.js';
 import { MAX_NOTES, MAX_NOTE_LENGTH, MAX_FACT_LENGTH } from './db.js';
+import { parseStaff, MAX_TIMEOUT_MINUTES, MAX_SLOWMODE_SECONDS, MAX_PURGE } from './staff.js';
 
 const RULES = `
 You are roleplaying as a real person in a Discord chat. Never say you are an AI, a bot or a language model, and never break character.
@@ -19,19 +20,23 @@ You MAY add "rephrase" to a reply: the same first message reworded differently. 
 Chat lines are formatted as "[n] name [HH:MM]: text" (server time; [n] identifies the message). Do not prefix your own messages with your name.
 The people list in "Where you are" says how well you know each person and what you remember about them. Be warmer and more teasing with close friends; more reserved with strangers. Use what you remember naturally (it surprises people when you recall small things).
 Reactions: when a reaction says it better than words, reply {"action":"react","emoji":"💀","target":3} — "target" is the [n] of a chat line; omit it to react to the newest message. Use it for memes, wild takes, or acknowledging something without a full reply.
-Images people post may be attached to their message; look at them and react like a person would. Older images appear only as "[sent N image(s)]".
+Images people post may be attached to their message; look at them and react like a person would. You see each image once; afterwards its line carries your own description as "[image: ...]". To look at recent pictures again, read "images".
+GIFs arrive as "[sent a GIF: <link>]" or as a tenor/giphy/.gif link in the text. You cannot watch them, but the link and any caption tell you the vibe — react to that naturally, never ask "what gif?".
 
 Your private memory and this server's details are not shown to you by default — read them on demand with {"action":"lookup","what":"..."}, and you'll be asked again with what you read:
 - "notes": your own notebook entries (people's quirks, promises, running jokes)
 - "server": your notebook about this server — what it is about, the vibe, who relates to whom
 - "info": hard Discord facts — owner, boost level, member count, server age, channels, emojis
+- "structure": the channel layout — every category with its channels, plus channels without a category
+- "roles": every role — name, color, position and key permissions
+- "images": re-look at the last few images posted in this channel; they get attached to your next read
 - "announcements": recent server announcements
 - "diary": what happened earlier in this channel
 - "person" (plus "name":"Sam"): what you remember and feel about someone
 - "member" (plus "name":"Sam"): someone's Discord side — roles, permissions, join date
 You do not have to answer instantly — reading first is normal, and quality beats speed.
-When to use which: people's history, feelings or past events -> "person"/"diary"/"notes"; what the server is like or who is who in it -> "server"; who owns it, boost level, someone's roles or permissions -> "info"/"member"; anything about announcements -> "announcements". Never guess that stuff — look it up.
-Examples: "who even owns this server?" -> {"action":"lookup","what":"info"}. "does sam have admin?" -> {"action":"lookup","what":"member","name":"Sam"}. "what roles does rae have?" -> {"action":"lookup","what":"member","name":"Rae"}. "so what is this server about?" -> {"action":"lookup","what":"server"}. "do you remember what we planned?" -> {"action":"lookup","what":"diary"}.
+When to use which: people's history, feelings or past events -> "person"/"diary"/"notes"; what the server is like or who is who in it -> "server"; who owns it, boost level, someone's roles or permissions -> "info"/"member"; which channels/categories exist or where things are -> "structure"; what roles exist, their colors or permissions -> "roles"; someone asks about a picture from earlier -> "images"; anything about announcements -> "announcements". Never guess that stuff — look it up. Before creating a channel, category or role, look up "structure"/"roles" first so you do not duplicate something that already exists.
+Examples: "who even owns this server?" -> {"action":"lookup","what":"info"}. "does sam have admin?" -> {"action":"lookup","what":"member","name":"Sam"}. "what roles does rae have?" -> {"action":"lookup","what":"member","name":"Rae"}. "so what is this server about?" -> {"action":"lookup","what":"server"}. "do you remember what we planned?" -> {"action":"lookup","what":"diary"}. "what channels are there?" -> {"action":"lookup","what":"structure"}. "what color is the VIP role?" -> {"action":"lookup","what":"roles"}. "what was that pic again?" -> {"action":"lookup","what":"images"}.
 At most two lookups per reply.
 Writing to memory still works in every action via "notes": {"add":["text"],"remove":["#3"]}. Keep each note under ${MAX_NOTE_LENGTH} characters. At most ${MAX_NOTES} notes exist; the oldest are dropped first.`.trim();
 
@@ -58,7 +63,47 @@ const GIF_RULE =
   `\n\nGIFs: when a GIF says it better than words, reply {"action":"gif","query":"angry cat"} — "query" is a short English search phrase. ` +
   `You may include "messages":["..."] to send a short text first. Use them rarely, like people do: a perfect reaction moment, not filler.`;
 
-function buildSystemPrompt({ persona, botName, mustAnswer, place, now, nudge, mood, lookupContext }) {
+const staffRules = () =>
+  `\n\nServer staff help: when someone clearly asks, you can do light moderation. Reply with ONLY one of:\n` +
+  `{"action":"staff","op":"lock_channel","channel":"general"}\n` +
+  `{"action":"staff","op":"unlock_channel","channel":"general"}\n` +
+  `{"action":"staff","op":"slowmode","channel":"general","seconds":30}\n` +
+  `{"action":"staff","op":"timeout","user":"Sam","minutes":15,"reason":"spam"}\n` +
+  `{"action":"staff","op":"untimeout","user":"Sam"}\n` +
+  `{"action":"staff","op":"create_category","name":"Events"}\n` +
+  `{"action":"staff","op":"create_channel","name":"vents","category":"Events","type":"text","topic":"what it is for"}\n` +
+  `{"action":"staff","op":"rename_channel","channel":"old-name","name":"new-name"}\n` +
+  `{"action":"staff","op":"set_topic","channel":"general","topic":"the new topic"}\n` +
+  `{"action":"staff","op":"delete_channel","channel":"vents"}\n` +
+  `{"action":"staff","op":"delete_category","category":"Events"}\n` +
+  `{"action":"staff","op":"create_role","name":"Helpers","color":"#57f287"}\n` +
+  `{"action":"staff","op":"delete_role","role":"Helpers"}\n` +
+  `{"action":"staff","op":"give_role","user":"Sam","role":"Helpers"}\n` +
+  `{"action":"staff","op":"remove_role","user":"Sam","role":"Helpers"}\n` +
+  `{"action":"staff","op":"role_perms","role":"Helpers","allow":["ManageMessages","AddReactions"],"deny":["MentionEveryone"]}\n` +
+  `{"action":"staff","op":"channel_perms","channel":"staff-room","target":"Helpers","allow":["ViewChannel","SendMessages"],"deny":[]}\n` +
+  `{"action":"staff","op":"delete_message","message":"<message link or id>","reason":"scam"}\n` +
+  `{"action":"staff","op":"purge","user":"Sam","count":5,"reason":"spam flood"}\n` +
+  `"channel" is optional and defaults to this channel. "seconds" 0 turns slowmode off (max ${MAX_SLOWMODE_SECONDS}). ` +
+  `"minutes" is at most ${MAX_TIMEOUT_MINUTES}. "user" matches a display name or username. ` +
+  `For create_channel: "type" is "text" (default) or "voice", "category" and "topic" are optional. ` +
+  `Channel names become lowercase-with-dashes automatically. You can ONLY delete channels, categories or roles you created yourself. ` +
+  `Renames and topic changes are limited to about 2 per 10 minutes per channel — if one was just changed, say so instead of retrying. ` +
+  `For role_perms/channel_perms: "allow"/"deny" are Discord permission names; "target" is a role name, a member name, or "@everyone". ` +
+  `To make a channel private to a role: deny ViewChannel for "@everyone" and allow ViewChannel for that role (two actions). ` +
+  `You may ONLY touch everyday permissions (chat, voice, reactions, embeds, Manage Messages, voice moderation). ` +
+  `NEVER grant or revoke Administrator, Manage Server, Manage Roles, Manage Channels, Ban/Kick, timeout power, webhooks or Mention Everyone — refuse such asks in character. ` +
+  `Roles above your own or the asker's top role cannot be managed; the same confirm step applies. ` +
+  `delete_message: "message" is a message link or id, or omit it and use "target":[n] of a chat line. purge: "count" is at most ${MAX_PURGE}, newest messages of that user in this channel. ` +
+  `Scam links, invite drops and mention spam are already deleted automatically by auto-mod — check recent staff events before offering to clean them yourself.\n` +
+  `You may add "messages":["short line"] to say something in character while it gets handled.\n` +
+  `The person asking MUST already have the matching Discord permission — "Where you are" tells you what they can do. ` +
+  `If they lack it, refuse in character like a friend would ("you can't even manage channels here lol, ask a mod"), never with system-speak. ` +
+  `You can never ban or kick anyone; do not offer or pretend otherwise.\n` +
+  `The requester gets a private confirm step before anything actually happens — you do not execute it yourself, ` +
+  `and you never mention buttons, JSON, permissions machinery or any internals. Just talk like a person helping out.`;
+
+function buildSystemPrompt({ persona, botName, mustAnswer, place, now, nudge, mood, lookupContext, staffOn, staffPerms, staffEvents, staffFeedback }) {
   const extra = mustAnswer
     ? 'The latest message is addressed to you. You may still ignore it only if your character truly would.'
     : 'You are just overhearing the chat. Ignoring is very normal here; only jump in if it feels natural.';
@@ -68,11 +113,22 @@ function buildSystemPrompt({ persona, botName, mustAnswer, place, now, nudge, mo
   const read = lookupContext
     ? `\n\nYou just read this from your memory:\n${lookupContext}\n\nReply to the chat now — use it if it helps, ignore it if it doesn't.`
     : '';
+  const staff = staffOn
+    ? `${staffRules()}${staffPerms ? `\n${staffPerms}` : ''}` +
+      (staffEvents
+        ? `\n\nRecent staff events — this is what ACTUALLY happened. Never claim an action succeeded unless it says DONE, ` +
+          `and never say a denied, expired or blocked one went through:\n${staffEvents}`
+        : '')
+    : '';
+  const blocked = staffFeedback
+    ? `\n\nYour staff action was just BLOCKED: ${staffFeedback}. Nothing happened. Answer the chat now — decline or explain ` +
+      `naturally in character, like a person would. Never mention systems or internals, and do not retry the same staff action.`
+    : '';
   return (
     `${persona}\n\nYour name in this chat is "${botName}".\n\nWhere you are:\n${place}\n\n${RULES}` +
-    `${config.ttsEnabled ? voiceRules() : ''}${config.tenorKey ? GIF_RULE : ''}\n\nRight now it is ${now} (server time). ` +
+    `${config.ttsEnabled ? voiceRules() : ''}${config.tenorKey ? GIF_RULE : ''}${staff}\n\nRight now it is ${now} (server time). ` +
     `Let it shape your energy and mood — late-night sleepiness, morning grogginess, weekend vibes.` +
-    `${mood ? `\n\n${mood}` : ''}${read}${thought}\n\n${extra}`
+    `${mood ? `\n\n${mood}` : ''}${read}${blocked}${thought}\n\n${extra}`
   );
 }
 
@@ -108,8 +164,8 @@ function cleanNotes(raw) {
 }
 
 const JSONISH = /^\s*[\[{]/;
-const ACTIONISH = /\baction\b\s*[:：]|['"“”]messages['"“”]\s*[:：]/;
-const LOOKUP_KINDS = new Set(['server', 'announcements', 'diary', 'notes', 'person', 'info', 'member']);
+const ACTIONISH = /\baction\b\s*[:：]|['"“”](action|messages)['"“”]\s*[:：]/;
+const LOOKUP_KINDS = new Set(['server', 'announcements', 'diary', 'notes', 'person', 'info', 'member', 'structure', 'roles', 'images']);
 
 /** JSON.parse, with one repair pass for the most common model slips (smart quotes, trailing commas). */
 function tryParseJson(text) {
@@ -136,6 +192,83 @@ function unwrapJson(text, depth) {
   return [text];
 }
 
+/**
+ * Every balanced top-level {...} span, ignoring braces inside strings. Prose or a second,
+ * truncated JSON object after a complete one must not poison the parse (the old
+ * first-'{'-to-last-'}' slice did exactly that). `open` means a span ran to the end unclosed.
+ */
+function scanObjects(text) {
+  const objects = [];
+  let open = false;
+  let i = text.indexOf('{');
+  while (i !== -1) {
+    let depth = 0;
+    let inStr = false;
+    let esc = false;
+    let j = i;
+    for (; j < text.length; j++) {
+      const ch = text[j];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+      } else if (ch === '"') inStr = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}' && --depth === 0) {
+        objects.push(text.slice(i, j + 1));
+        break;
+      }
+    }
+    if (j >= text.length) {
+      open = true;
+      break;
+    }
+    i = text.indexOf('{', j + 1);
+  }
+  return { objects, open };
+}
+
+/** String literals of a messages array, tolerating a last one cut off mid-generation. Stops at ] or a new object. */
+function arrayStrings(s) {
+  const out = [];
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === ']' || ch === '{') break;
+    if (ch !== '"') {
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    let raw = '';
+    while (j < s.length && s[j] !== '"') {
+      if (s[j] === '\\' && j + 1 < s.length) {
+        raw += s[j] + s[j + 1];
+        j += 2;
+      } else raw += s[j++];
+    }
+    let value = raw;
+    try {
+      value = JSON.parse(`"${raw}"`);
+    } catch {
+      value = raw.replace(/\\(["\\/bfnrt])/g, (_, c) => ({ b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' })[c] ?? c);
+    }
+    if (value.trim()) out.push(value.trim());
+    i = j + 1;
+  }
+  return out;
+}
+
+/** Salvages a reply whose generation hit max_tokens mid-JSON: keep whatever messages survived. */
+function recoverTruncated(text) {
+  const m = text.match(/"messages"\s*:\s*\[/);
+  if (!m) return null;
+  const action = text.match(/"action"\s*:\s*"([a-z]+)"/i)?.[1]?.toLowerCase();
+  if (action && action !== 'reply') return null;
+  const messages = arrayStrings(text.slice(m.index + m[0].length)).slice(0, 4);
+  return messages.length ? { action: 'reply', messages } : null;
+}
+
 /** True for plain unicode emoji (incl. flags/ZWJ) or Discord custom emoji; rejects ":shortcode:" and mixed text. */
 export function isValidEmoji(emoji) {
   if (typeof emoji !== 'string') return false;
@@ -159,53 +292,64 @@ export function parseReply(raw, depth = 0) {
   let text = raw.trim();
   text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
 
-  const start = text.indexOf('{');
-  const end = text.lastIndexOf('}');
-  if (start !== -1 && end > start) {
-    const data = tryParseJson(text.slice(start, end + 1));
-    if (data && typeof data === 'object') {
-      const notes = cleanNotes(data.notes);
-      if (data.action === 'ignore') return { action: 'ignore', notes };
-      if (data.action === 'voice' && config.ttsEnabled && typeof data.text === 'string') {
-        const text = data.text.trim().slice(0, config.ttsMaxChars);
-        if (text) return { action: 'voice', text, notes };
-      }
-      if (data.action === 'react') {
-        const emoji = typeof data.emoji === 'string' ? data.emoji.trim().slice(0, 64) : '';
-        if (isValidEmoji(emoji)) {
-          const target = Number(data.target);
-          return { action: 'react', emoji, target: Number.isInteger(target) ? target : null, notes };
-        }
-        // Broken emoji: fall through — maybe the model also sent text.
-      }
-      if (data.action === 'gif' && config.tenorKey) {
-        const query = typeof data.query === 'string' ? data.query.trim().slice(0, 80) : '';
-        if (query) {
-          const list = (Array.isArray(data.messages) ? data.messages : [])
-            .filter((s) => typeof s === 'string')
-            .map((s) => s.trim())
-            .filter(Boolean);
-          return { action: 'gif', query, messages: list.slice(0, 2), notes };
-        }
-        // Empty query: fall through — maybe the model also sent text.
-      }
-      if (data.action === 'lookup') {
-        const what = typeof data.what === 'string' ? data.what.trim().toLowerCase().slice(0, 40) : '';
-        if (LOOKUP_KINDS.has(what)) {
-          const name = typeof data.name === 'string' ? data.name.trim().slice(0, 60) : '';
-          return { action: 'lookup', what, name: name || null, notes };
-        }
-        // Unknown kind: fall through — maybe the model also sent text.
-      }
-      // Also covers a "voice" answer while TTS is off: it just becomes a normal text reply.
-      const list = (Array.isArray(data.messages) ? data.messages : [data.message ?? data.content ?? data.text])
-        .filter((s) => typeof s === 'string')
-        .flatMap((s) => unwrapJson(s.trim(), depth))
-        .filter(Boolean);
-      const rephrase = typeof data.rephrase === 'string' ? data.rephrase.trim().slice(0, 2000) : null;
-      if (list.length) return { action: 'reply', messages: list.slice(0, 4), notes, rephrase: rephrase || null };
-      return { action: 'ignore', notes };
+  const { objects, open } = scanObjects(text);
+  let data = null;
+  for (const candidate of objects) {
+    const parsed = tryParseJson(candidate);
+    if (parsed && typeof parsed === 'object') {
+      data = parsed;
+      break;
     }
+  }
+  // Generation cut off mid-JSON: deliver the messages that survived instead of silence.
+  if (!data && open) data = recoverTruncated(text.replace(/[“”„‟]/g, '"'));
+  if (data) {
+    const notes = cleanNotes(data.notes);
+    if (data.action === 'ignore') return { action: 'ignore', notes };
+    if (data.action === 'voice' && config.ttsEnabled && typeof data.text === 'string') {
+      const text = data.text.trim().slice(0, config.ttsMaxChars);
+      if (text) return { action: 'voice', text, notes };
+    }
+    if (data.action === 'react') {
+      const emoji = typeof data.emoji === 'string' ? data.emoji.trim().slice(0, 64) : '';
+      if (isValidEmoji(emoji)) {
+        const target = Number(data.target);
+        return { action: 'react', emoji, target: Number.isInteger(target) ? target : null, notes };
+      }
+      // Broken emoji: fall through — maybe the model also sent text.
+    }
+    if (data.action === 'gif' && config.tenorKey) {
+      const query = typeof data.query === 'string' ? data.query.trim().slice(0, 80) : '';
+      if (query) {
+        const list = (Array.isArray(data.messages) ? data.messages : [])
+          .filter((s) => typeof s === 'string')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        return { action: 'gif', query, messages: list.slice(0, 2), notes };
+      }
+      // Empty query: fall through — maybe the model also sent text.
+    }
+    if (data.action === 'lookup') {
+      const what = typeof data.what === 'string' ? data.what.trim().toLowerCase().slice(0, 40) : '';
+      if (LOOKUP_KINDS.has(what)) {
+        const name = typeof data.name === 'string' ? data.name.trim().slice(0, 60) : '';
+        return { action: 'lookup', what, name: name || null, notes };
+      }
+      // Unknown kind: fall through — maybe the model also sent text.
+    }
+    if (data.action === 'staff' && config.staffEnabled) {
+      const parsed = parseStaff(data);
+      if (parsed) return { action: 'staff', ...parsed, notes };
+      // Unusable op/fields: fall through — maybe the model also sent text.
+    }
+    // Also covers a "voice" answer while TTS is off: it just becomes a normal text reply.
+    const list = (Array.isArray(data.messages) ? data.messages : [data.message ?? data.content ?? data.text])
+      .filter((s) => typeof s === 'string')
+      .flatMap((s) => unwrapJson(s.trim(), depth))
+      .filter(Boolean);
+    const rephrase = typeof data.rephrase === 'string' ? data.rephrase.trim().slice(0, 2000) : null;
+    if (list.length) return { action: 'reply', messages: list.slice(0, 4), notes, rephrase: rephrase || null };
+    return { action: 'ignore', notes };
   }
 
   const notes = { add: [], remove: [] };
@@ -366,15 +510,42 @@ export async function updateServerNotebook({ botName, current, lines, announceme
   return text.trim().slice(0, config.serverNotebookChars);
 }
 
-export async function generateReply({ history, botId, botName, persona, mustAnswer, place, now, nudge, mood, lookupContext, signal }) {
-  const system = { role: 'system', content: buildSystemPrompt({ persona, botName, mustAnswer, place, now, nudge, mood, lookupContext }) };
-  const hasImages = history.some((m) => m.images?.length);
+export async function generateReply({ history, botId, botName, persona, mustAnswer, place, now, nudge, mood, lookupContext, lookupImages = [], staffOn, staffPerms, staffEvents, staffFeedback, signal }) {
+  const system = { role: 'system', content: buildSystemPrompt({ persona, botName, mustAnswer, place, now, nudge, mood, lookupContext, staffOn, staffPerms, staffEvents, staffFeedback }) };
+  // An "images" lookup re-attaches recent pictures as a final user message, even seen ones.
+  const reread = lookupImages.length
+    ? [{ role: 'user', content: [{ type: 'text', text: '(the images you asked to re-read, oldest first)' }, ...lookupImages.map((url) => ({ type: 'image_url', image_url: { url } }))] }]
+    : [];
+  const hasImages = history.some((m) => m.images?.length) || lookupImages.length > 0;
   try {
-    return resolveAction(parseReply(await chat({ messages: [system, ...toChatMessages(history, botId)], signal })), history, botId);
+    return resolveAction(parseReply(await chat({ messages: [system, ...toChatMessages(history, botId), ...reread], signal })), history, botId);
   } catch (error) {
     // Model/provider may not support vision or could not fetch the image: retry as text only.
     if (!hasImages || signal?.aborted || !/HTTP 4\d\d/.test(error.message)) throw error;
     console.warn('[ai] image request rejected, retrying without images:', error.message);
     return resolveAction(parseReply(await chat({ messages: [system, ...toChatMessages(history, botId, false)], signal })), history, botId);
+  }
+}
+
+/** One or two plain sentences per image, one line each, in order; empty when vision is unavailable. */
+export async function describeImageUrls(urls) {
+  if (!urls.length) return [];
+  try {
+    const text = await chat({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: `Describe each image in one or two plain sentences. Reply with exactly ${urls.length} lines, line N describing image N. No numbering, no preamble.` },
+            ...urls.map((url) => ({ type: 'image_url', image_url: { url } })),
+          ],
+        },
+      ],
+      temperature: 0.3,
+      maxTokens: 300,
+    });
+    return text.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  } catch {
+    return []; // descriptions are a bonus; never break the chat over them
   }
 }
