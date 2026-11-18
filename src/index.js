@@ -1,6 +1,6 @@
 import { Client, Events, GatewayIntentBits, Partials } from 'discord.js';
 import { config } from './config.js';
-import { onMessage, restoreFollowUps } from './brain.js';
+import { onMessage, restoreFollowUps, isEnabled } from './brain.js';
 import { handleAutomod } from './automod.js';
 import { commands, handleCommand } from './commands.js';
 import { handleStaffButton } from './staffFlow.js';
@@ -34,7 +34,7 @@ client.once(Events.ClientReady, async (c) => {
 
 client.on(Events.MessageCreate, async (message) => {
   try {
-    if (await handleAutomod(message)) return; // deleted as spam/scam: nothing to chat about
+    if (isEnabled(message.channelId) && (await handleAutomod(message))) return; // deleted as spam/scam: nothing to chat about
     onMessage(message);
   } catch (error) {
     console.error('[messageCreate]', error);

@@ -265,6 +265,13 @@ async function sendVoice(channel, text, { replyTo, signal }) {
 const notebookScope = (channel) => (channel.guild ? `guild:${channel.guild.id}` : `dm:${channel.id}`);
 
 async function run(channel, state, nudge = null) {
+  // The channel may have been toggled off during the debounce window.
+  if (!isEnabled(channel.id)) {
+    state.mustAnswer = false;
+    state.replyTo = null;
+    state.timer = null;
+    return;
+  }
   const controller = new AbortController();
   state.controller = controller;
   state.timer = null;

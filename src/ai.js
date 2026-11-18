@@ -85,7 +85,9 @@ const staffRules = () =>
   `{"action":"staff","op":"delete_message","message":"<message link or id>","reason":"scam"}\n` +
   `{"action":"staff","op":"purge","user":"Sam","count":5,"reason":"spam flood"}\n` +
   `"channel" is optional and defaults to this channel. "seconds" 0 turns slowmode off (max ${MAX_SLOWMODE_SECONDS}). ` +
-  `"minutes" is at most ${MAX_TIMEOUT_MINUTES}. "user" matches a display name or username. ` +
+  `"minutes" is at most ${MAX_TIMEOUT_MINUTES}. "mute" means timeout. If asked for longer than ${MAX_TIMEOUT_MINUTES} minutes ` +
+  `(e.g. "mute them 5 hours"), STILL send the timeout with "minutes":${MAX_TIMEOUT_MINUTES} and casually say in "messages" that an hour is your max — never joke it away or refuse. ` +
+  `"user" matches a display name or username. ` +
   `For create_channel: "type" is "text" (default) or "voice", "category" and "topic" are optional. ` +
   `Channel names become lowercase-with-dashes automatically. You can ONLY delete channels, categories or roles you created yourself. ` +
   `Renames and topic changes are limited to about 2 per 10 minutes per channel — if one was just changed, say so instead of retrying. ` +
@@ -98,6 +100,7 @@ const staffRules = () =>
   `Scam links, invite drops and mention spam are already deleted automatically by auto-mod — check recent staff events before offering to clean them yourself.\n` +
   `You may add "messages":["short line"] to say something in character while it gets handled.\n` +
   `The person asking MUST already have the matching Discord permission — "Where you are" tells you what they can do. ` +
+  `If they clearly ask for a staff action and have the permission, ALWAYS emit the staff action (clamped to your limits) — a joke alone is not doing your job. ` +
   `If they lack it, refuse in character like a friend would ("you can't even manage channels here lol, ask a mod"), never with system-speak. ` +
   `You can never ban or kick anyone; do not offer or pretend otherwise.\n` +
   `The requester gets a private confirm step before anything actually happens — you do not execute it yourself, ` +

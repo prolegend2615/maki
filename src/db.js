@@ -5,6 +5,8 @@ mkdirSync('data', { recursive: true });
 
 // BOT_DB lets the test suite use a scratch database instead of the live bot's one.
 const db = new DatabaseSync(process.env.BOT_DB || 'data/bot.db');
+// WAL + busy timeout: readers never block on a writer, and brief write contention waits instead of throwing.
+db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 3000;');
 db.exec(`
   CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS notes (
