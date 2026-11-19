@@ -99,6 +99,9 @@ const LOCK_NEUTRAL = {
   CreatePublicThreads: null,
   CreatePrivateThreads: null,
 };
+// A lock gags @everyone, not Mika: without her own allow overwrite she would lose
+// Send Messages too and silently stop answering in the locked channel.
+const LOCK_BOT_ALLOW = { ViewChannel: true, SendMessages: true, SendMessagesInThreads: true };
 
 const lockKey = (channelId) => `staffLock:${channelId}`;
 const deny = (reason) => ({ ok: false, reason });
@@ -604,22 +607,36 @@ export async function executeStaff(plan, guild) {
 
     const audit = `by ${plan.requesterName} via chat${plan.reason ? `: ${plan.reason}` : ''}`;
     const everyone = guild.roles.everyone;
+    const me = guild.members.me;
 
     switch (plan.op) {
       case 'lock_channel': {
         const current = channel.permissionOverwrites.cache.get(everyone.id);
-        setSetting(
-          lockKey(channel.id),
-          current ? JSON.stringify({ allow: current.allow.bitfield.toString(), deny: current.deny.bitfield.toString() }) : 'none',
-        );
+        const botOw = channel.permissionOverwrites.cache.get(me.id);
+        const bits = (ow) => ({ allow: ow.allow.bitfield.toString(), deny: ow.deny.bitfield.toString() });
+        setSetting(lockKey(channel.id), JSON.stringify({ everyone: current ? bits(current) : null, bot: botOw ? bits(botOw) : null }));
         await channel.permissionOverwrites.edit(everyone, LOCK_DENY, { reason: audit });
+        await channel.permissionOverwrites.edit(me, LOCK_BOT_ALLOW, { reason: audit });
         break;
       }
       case 'unlock_channel': {
         const saved = getSetting(lockKey(channel.id));
         if (saved && saved !== 'none') {
-          const { allow, deny: denied } = JSON.parse(saved);
-          await channel.permissionOverwrites.edit(everyone, { allow: BigInt(allow), deny: BigInt(denied) }, { reason: audit });
+          const data = JSON.parse(saved);
+          // Old saved format was the @everyone bits alone; newer saves also carry Mika's overwrite.
+          const everyoneState = 'everyone' in data ? data.everyone : data;
+          if (everyoneState) {
+            await channel.permissionOverwrites.edit(everyone, { allow: BigInt(everyoneState.allow), deny: BigInt(everyoneState.deny) }, { reason: audit });
+          } else {
+            await channel.permissionOverwrites.edit(everyone, LOCK_NEUTRAL, { reason: audit });
+          }
+          if ('everyone' in data) {
+            if (data.bot) {
+              await channel.permissionOverwrites.edit(me, { allow: BigInt(data.bot.allow), deny: BigInt(data.bot.deny) }, { reason: audit });
+            } else {
+              await channel.permissionOverwrites.delete(me, audit).catch(() => {});
+            }
+          }
         } else {
           // No saved state (locked by someone else): only neutralize the lock bits, keep everything else.
           await channel.permissionOverwrites.edit(everyone, LOCK_NEUTRAL, { reason: audit });

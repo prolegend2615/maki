@@ -113,16 +113,23 @@ export function onMessage(message) {
     handleAnnouncement(message);
   }
 
-  if (message.author.bot || !isEnabled(message.channelId)) return;
+  if (message.author.bot) return;
+  const pinged = isAddressedToBot(message, client.user.id);
+  if (!isEnabled(message.channelId)) {
+    if (pinged) console.log(`[brain] ping ignored in ${message.channelId}: channel toggled off (/toggle enabled:true to re-enable)`);
+    return;
+  }
 
   if (message.guild) {
     const perms = message.channel.permissionsFor(client.user);
-    if (!perms?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) return;
+    if (!perms?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages])) {
+      if (pinged) console.log(`[brain] ping ignored in #${message.channel.name}: bot lacks ViewChannel/SendMessages there (locked or hidden channel)`);
+      return;
+    }
   }
 
   const state = stateFor(message.channelId);
   const now = Date.now();
-  const pinged = isAddressedToBot(message, client.user.id);
   // Someone who pinged the bot recently can keep talking without pinging again.
   const followUp = (state.engaged.get(message.author.id) ?? 0) > now;
   const inWindow = now < state.activeUntil;
@@ -267,6 +274,7 @@ const notebookScope = (channel) => (channel.guild ? `guild:${channel.guild.id}` 
 async function run(channel, state, nudge = null) {
   // The channel may have been toggled off during the debounce window.
   if (!isEnabled(channel.id)) {
+    if (state.mustAnswer) console.log(`[brain] dropped pending reply in ${channel.id}: channel toggled off`);
     state.mustAnswer = false;
     state.replyTo = null;
     state.timer = null;

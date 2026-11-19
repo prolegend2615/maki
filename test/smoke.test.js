@@ -423,7 +423,11 @@ test('staff confirm flow: wrong user, deny, double-click, confirm, expiry', asyn
     name: 'general',
     guildId: 'g1',
     permissionsFor: () => mkPerms([PermissionFlagsBits.ManageRoles]),
-    permissionOverwrites: { cache: { get: () => undefined }, edit: async (...a) => overwrites.push(a) },
+    permissionOverwrites: {
+      cache: { get: () => undefined },
+      edit: async (...a) => overwrites.push(a),
+      delete: async (...a) => overwrites.push(['del', ...a]),
+    },
   };
   const guild = {
     id: 'g1',
@@ -468,15 +472,30 @@ test('staff confirm flow: wrong user, deny, double-click, confirm, expiry', asyn
 
   await startStaffConfirm(channel, plan, {});
   await handleStaffButton(mkInteraction(buttonId(sent[1], 0), 'u1'));
-  assert.equal(overwrites.length, 1);
+  assert.equal(overwrites.length, 2);
   assert.deepEqual(overwrites[0][1], {
     SendMessages: false,
     SendMessagesInThreads: false,
     CreatePublicThreads: false,
     CreatePrivateThreads: false,
   });
+  // The lock must not gag Mika herself: her own allow overwrite goes in second.
+  assert.equal(overwrites[1][0], me);
+  assert.deepEqual(overwrites[1][1], { ViewChannel: true, SendMessages: true, SendMessagesInThreads: true });
   assert.match(updates.at(-1).embeds[0].data.title, /Done/);
   assert.match(staffEventsLine(cid), /DONE/);
+
+  await startStaffConfirm(channel, { ...plan, op: 'unlock_channel', summary: 'Unlock #general' }, {});
+  await handleStaffButton(mkInteraction(buttonId(sent[2], 0), 'u1'));
+  assert.equal(overwrites.length, 4);
+  assert.deepEqual(overwrites[2][1], {
+    SendMessages: null,
+    SendMessagesInThreads: null,
+    CreatePublicThreads: null,
+    CreatePrivateThreads: null,
+  });
+  assert.equal(overwrites[3][0], 'del'); // bot exemption removed again on unlock
+  assert.equal(overwrites[3][1], me);
 
   config.staffConfirmSeconds = 0.05;
   try {
