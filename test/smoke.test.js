@@ -1125,6 +1125,36 @@ test('describeImageUrls returns one line per image and survives vision failures'
   }
 });
 
+test('llm falls through a rate-limited provider and skips it during cooldown', async () => {
+  const { chat } = await import('../src/llm.js');
+  const oldFetch = globalThis.fetch;
+  const oldProviders = config.providers;
+  const tag = `t${process.pid}`;
+  const calls = [];
+  config.providers = [
+    { label: `${tag}-dead`, apiBase: 'https://dead/v1', apiKey: 'k', models: ['m1', 'm2'] },
+    { label: `${tag}-live`, apiBase: 'https://live/v1', apiKey: 'k', models: ['m3'] },
+  ];
+  globalThis.fetch = async (url) => {
+    calls.push(url);
+    if (url.startsWith('https://dead')) {
+      return { ok: false, status: 429, text: async () => '{"error":{"code":"rate_limit_exceeded","message":"today free-model token quota"}}' };
+    }
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: 'alive' } }] }) };
+  };
+  try {
+    assert.equal(await chat({ messages: [] }), 'alive');
+    assert.equal(calls.filter((u) => u.startsWith('https://dead')).length, 2); // both tries of m1, then straight to next provider
+    assert.equal(calls.filter((u) => u.startsWith('https://live')).length, 1);
+    calls.length = 0;
+    assert.equal(await chat({ messages: [] }), 'alive');
+    assert.deepEqual(calls, ['https://live/v1/chat/completions']); // dead provider skipped while cooling down
+  } finally {
+    globalThis.fetch = oldFetch;
+    config.providers = oldProviders;
+  }
+});
+
 test('parseReply keeps notes, even when ignoring', () => {
   const r = parseReply('{"action":"ignore","notes":{"add":["Sam likes cats"],"remove":["#2","x"]}}');
   assert.deepEqual(r, { action: 'ignore', notes: { add: ['Sam likes cats'], remove: [2] } });

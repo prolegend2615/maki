@@ -4,6 +4,12 @@ const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
 const ATTEMPTS_PER_MODEL = 2;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// A 429 means "not now": retrying the same provider on every message just burns time.
+// Daily-quota wording gets a long cooldown, a plain rate limit a short one.
+const blockedUntil = new Map();
+const cooldownFor = (message) =>
+  /HTTP 429/.test(message) ? (/quota|daily/i.test(message) ? 30 * 60_000 : 60_000) : 0;
+
 /** One model on one provider, a couple of tries for transient errors. Throws when the model is unusable right now. */
 async function callModel(provider, model, { messages, signal, temperature, maxTokens }) {
   let lastError;
@@ -64,6 +70,11 @@ export async function chat({ messages, signal, temperature = config.temperature,
   const failures = [];
 
   for (const [pi, provider] of config.providers.entries()) {
+    const until = blockedUntil.get(provider.label) ?? 0;
+    if (Date.now() < until) {
+      console.log(`[llm] skipping ${provider.label}: rate-limited, ${Math.ceil((until - Date.now()) / 60_000)}m cooldown left`);
+      continue;
+    }
     for (const [mi, model] of provider.models.entries()) {
       const started = Date.now();
       try {
@@ -73,6 +84,12 @@ export async function chat({ messages, signal, temperature = config.temperature,
       } catch (error) {
         if (signal?.aborted) throw error;
         failures.push(`${provider.label}/${model}: ${error.message}`);
+        const cooldown = cooldownFor(error.message);
+        if (cooldown) {
+          blockedUntil.set(provider.label, Date.now() + cooldown);
+          console.warn(`[llm] ${provider.label} rate-limited — skipping it for ${cooldown / 60_000}m`);
+          break; // rest of this provider's models share the same limit
+        }
         const more = mi + 1 < provider.models.length || pi + 1 < config.providers.length;
         if (more) console.warn(`[llm] ${provider.label}/${model} failed, trying next: ${error.message.slice(0, 200)}`);
       }

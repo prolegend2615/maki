@@ -11,6 +11,7 @@ for (const level of ['log', 'warn', 'error']) {
   const original = console[level].bind(console);
   console[level] = (...args) => original(`[${stamp()}]`, ...args);
 }
+console.log(`[llm] provider chain: ${config.providers.map((p) => `${p.label}[${p.models.join(', ')}]`).join(' -> ')}`);
 
 const client = new Client({
   intents: [

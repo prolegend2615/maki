@@ -45,7 +45,12 @@ if (env.API_KEY) {
 for (let i = 1; i <= 8; i++) {
   const apiKey = env[`PROVIDER${i}_API_KEY`];
   const models = splitList(env[`PROVIDER${i}_MODELS`]);
-  if (!apiKey || !models.length) continue;
+  if (!apiKey || !models.length) {
+    if (apiKey || models.length || env[`PROVIDER${i}_BASE_URL`]) {
+      console.warn(`[config] PROVIDER${i} skipped: needs both PROVIDER${i}_API_KEY and PROVIDER${i}_MODELS`);
+    }
+    continue;
+  }
   const apiBase = (env[`PROVIDER${i}_BASE_URL`] || 'https://api.xkiro.com/v1').replace(/\/+$/, '');
   providers.push({ label: `${i}:${hostOf(apiBase)}`, apiBase, apiKey, models });
 }
