@@ -141,6 +141,7 @@ export function onMessage(message) {
     state.engaged.set(message.author.id, now + config.activeWindowMs);
     state.activeUntil = now + config.activeWindowMs;
     const name = message.member?.displayName ?? message.author.displayName;
+    if (pinged) console.log(`[brain] ping from ${name} in #${message.channel.name ?? message.channelId}: "${message.cleanContent.slice(0, 80)}"`);
     bumpUser(notebookScope(message.channel), message.author.id, name);
   }
 
@@ -346,6 +347,7 @@ async function run(channel, state, nudge = null) {
     // are read on demand via lookup actions. Two lookups max, then she must answer or ignore.
     let result = await generateReply(base);
     for (let reads = 0; result.action === 'lookup' && reads < 2 && !signal.aborted; reads++) {
+      console.log(`[brain] #${channel.name ?? channel.id}: lookup ${result.what}`);
       const reread = result.what === 'images' ? recentImageUrls(history) : [];
       const lookupContext =
         result.what === 'images' && !reread.length
@@ -353,7 +355,13 @@ async function run(channel, state, nudge = null) {
           : await performLookup(channel, scope, profiles, result);
       result = await generateReply({ ...base, lookupContext, lookupImages: reread });
     }
-    if (result.action === 'lookup') return settle(); // the model kept asking instead of answering
+    if (result.action === 'lookup') {
+      console.log(`[brain] #${channel.name ?? channel.id}: still asking for lookups after 2 reads, staying silent`);
+      return settle();
+    }
+    const detail =
+      result.action === 'staff' ? result.op : result.action === 'reply' ? `${result.messages?.length ?? 0} message(s)` : '';
+    console.log(`[brain] #${channel.name ?? channel.id}: decision ${result.action}${detail ? ` (${detail})` : ''}`);
 
     if (result.action === 'staff') {
       const requester =
@@ -398,7 +406,10 @@ async function run(channel, state, nudge = null) {
       if (channel.guild && !channel.permissionsFor(botId)?.has(PermissionFlagsBits.AddReactions)) return;
       await sleep(rand(600, 2500), signal); // read at human speed, then react
       const msg = await channel.messages.fetch(result.messageId).catch(() => null);
-      if (msg) await msg.react(result.emoji).catch(() => {});
+      if (msg) {
+        await msg.react(result.emoji).catch(() => {});
+        console.log(`[brain] #${channel.name ?? channel.id}: reacted ${result.emoji}`);
+      }
       if (nudge) recordProactive(channel.id);
       state.activeUntil = Date.now() + config.activeWindowMs;
       return;
@@ -406,9 +417,9 @@ async function run(channel, state, nudge = null) {
 
     if (result.action === 'voice') {
       // No text goes to Discord for a voice reply, unless voice fails: then say it as text instead.
-      if (!(await sendVoice(channel, result.text, { replyTo: quote, signal }))) {
-        await sendHuman(channel, result.text.slice(0, 2000), { replyTo: quote, signal });
-      }
+      const spoke = await sendVoice(channel, result.text, { replyTo: quote, signal });
+      if (!spoke) await sendHuman(channel, result.text.slice(0, 2000), { replyTo: quote, signal });
+      console.log(`[brain] #${channel.name ?? channel.id}: ${spoke ? 'voice reply sent' : 'voice failed, sent text instead'}`);
       if (nudge) recordProactive(channel.id);
       state.activeUntil = Date.now() + config.activeWindowMs;
       return;
@@ -428,6 +439,7 @@ async function run(channel, state, nudge = null) {
         if (nudge) recordProactive(channel.id);
         state.activeUntil = Date.now() + config.activeWindowMs;
       }
+      console.log(`[brain] #${channel.name ?? channel.id}: gif "${result.query}" ${url ? 'sent' : 'not found'}`);
       return; // no gif found: the optional text above already carried the reply
     }
 
@@ -444,10 +456,14 @@ async function run(channel, state, nudge = null) {
     }
     if (nudge) recordProactive(channel.id);
     state.activeUntil = Date.now() + config.activeWindowMs;
+    console.log(
+      `[brain] -> #${channel.name ?? channel.id}: "${(result.messages[0] ?? '').slice(0, 80)}"` +
+        (result.messages.length > 1 ? ` (+${result.messages.length - 1} more)` : ''),
+    );
   } catch (error) {
     if (signal.aborted) return; // superseded by a newer message
     settle();
-    console.error(`[brain] ${channel.id}:`, error.message);
+    console.error(`[brain] ${channel.id}:`, error.message.slice(0, 300));
   } finally {
     if (state.controller === controller) state.controller = null;
     // The run finished (not superseded): these images count as seen, and get a stored description.

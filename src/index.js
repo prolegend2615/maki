@@ -5,6 +5,13 @@ import { handleAutomod } from './automod.js';
 import { commands, handleCommand } from './commands.js';
 import { handleStaffButton } from './staffFlow.js';
 
+// Host consoles (VPS panels, pm2) often show no clock: stamp every log line with local time.
+const stamp = () => new Date().toLocaleTimeString('en-GB', { hour12: false });
+for (const level of ['log', 'warn', 'error']) {
+  const original = console[level].bind(console);
+  console[level] = (...args) => original(`[${stamp()}]`, ...args);
+}
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,

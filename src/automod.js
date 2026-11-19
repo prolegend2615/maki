@@ -94,6 +94,7 @@ export async function handleAutomod(message) {
   }
 
   const detail = `deleted ${name}'s message (${hit.kind})${timedOut ? `, timeout ${timedOut}m` : ''}`;
+  console.log(`[automod] #${message.channel.name ?? message.channel.id}: ${detail}`);
   recordStaffEvent(message.channel.id, `auto-mod: ${detail}`);
   auditStaff(guild, { summary: `Auto-mod ${hit.kind}`, requester: 'auto-mod', outcome: 'Done', detail });
   return true;

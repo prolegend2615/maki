@@ -65,16 +65,20 @@ export async function chat({ messages, signal, temperature = config.temperature,
 
   for (const [pi, provider] of config.providers.entries()) {
     for (const [mi, model] of provider.models.entries()) {
+      const started = Date.now();
       try {
-        return await callModel(provider, model, { messages, signal, temperature, maxTokens });
+        const text = await callModel(provider, model, { messages, signal, temperature, maxTokens });
+        console.log(`[llm] ok ${provider.label}/${model} (${Date.now() - started}ms)`);
+        return text;
       } catch (error) {
         if (signal?.aborted) throw error;
         failures.push(`${provider.label}/${model}: ${error.message}`);
         const more = mi + 1 < provider.models.length || pi + 1 < config.providers.length;
-        if (more) console.warn(`[llm] ${provider.label}/${model} failed, trying next: ${error.message}`);
+        if (more) console.warn(`[llm] ${provider.label}/${model} failed, trying next: ${error.message.slice(0, 200)}`);
       }
     }
   }
 
+  console.error(`[llm] ALL ${failures.length} provider/model attempts failed — no reply possible (daily quota? see lines above)`);
   throw new Error(failures.join(' | '));
 }
